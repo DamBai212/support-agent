@@ -1,11 +1,20 @@
-from fastapi import FastAPI
 from dotenv import load_dotenv
-import os
+from fastapi import FastAPI
 
-load_dotenv()  # reads my .env file
+from router import router as triage_router
 
-app = FastAPI(title="Support Agent")
+load_dotenv()
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "message": "Support agent is running"}
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Support Agent")
+
+    @app.get("/health")
+    def health_check() -> dict[str, str]:
+        return {"status": "ok", "message": "Support agent is running"}
+
+    app.include_router(triage_router)
+    return app
+
+
+app = create_app()
