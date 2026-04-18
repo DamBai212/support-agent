@@ -1,6 +1,6 @@
 # Support Agent
 
-`support-agent` is an LLM-powered internal tooling agent that classifies incoming support requests, generates structured responses, and routes work by intent. It is built to demonstrate real AI integration in an internal operations workflow, with production-minded validation, fallback handling, and error recovery around every model decision.
+`Support-agent` is an LLM-powered internal tooling agent that classifies incoming support requests, generates structured responses, and routes work by intent. It is built to demonstrate real AI integration in an internal operations workflow, with production-minded validation, fallback handling, and error recovery around every model decision.
 
 It accepts ticket text plus selected metadata, sends that context to an Anthropic model, and returns a structured routing decision with a queue, priority, confidence score, short rationale, and fallback flag.
 
