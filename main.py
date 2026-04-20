@@ -1,13 +1,33 @@
+from __future__ import annotations
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from router import router as triage_router
+from classifier import SupportTriageClassifier
+from router import (
+    ALLOWED_PRIORITIES,
+    ALLOWED_QUEUES,
+    SupportPriority,
+    SupportQueue,
+    router as triage_router,
+)
 
-load_dotenv()
+
+def create_classifier() -> SupportTriageClassifier:
+    return SupportTriageClassifier(
+        allowed_queues=ALLOWED_QUEUES,
+        allowed_priorities=ALLOWED_PRIORITIES,
+        fallback_queue=SupportQueue.MANUAL_REVIEW.value,
+        fallback_priority=SupportPriority.MEDIUM.value,
+    )
 
 
-def create_app() -> FastAPI:
+def create_app(
+    *, classifier: SupportTriageClassifier | None = None
+) -> FastAPI:
+    load_dotenv()
     app = FastAPI(title="Support Agent")
+    app.state.triage_classifier = classifier or create_classifier()
 
     @app.get("/health")
     def health_check() -> dict[str, str]:
