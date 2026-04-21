@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from classifier import SupportTriageClassifier
@@ -67,16 +67,12 @@ class TriageResponse(BaseModel):
 ALLOWED_QUEUES = tuple(queue.value for queue in SupportQueue)
 ALLOWED_PRIORITIES = tuple(priority.value for priority in SupportPriority)
 
-classifier_service = SupportTriageClassifier(
-    allowed_queues=ALLOWED_QUEUES,
-    allowed_priorities=ALLOWED_PRIORITIES,
-    fallback_queue=SupportQueue.MANUAL_REVIEW.value,
-    fallback_priority=SupportPriority.MEDIUM.value,
-)
 
-
-def get_classifier() -> SupportTriageClassifier:
-    return classifier_service
+def get_classifier(request: Request) -> SupportTriageClassifier:
+    classifier = getattr(request.app.state, "triage_classifier", None)
+    if classifier is None:
+        raise RuntimeError("Support triage classifier has not been configured.")
+    return classifier
 
 
 ClassifierDependency = Annotated[SupportTriageClassifier, Depends(get_classifier)]

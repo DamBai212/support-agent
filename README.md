@@ -50,12 +50,25 @@ Supported priorities:
 
 ### `GET /health`
 
-Returns a simple health payload:
+Returns a liveness payload that also indicates whether live model-backed triage is ready:
 
 ```json
 {
   "status": "ok",
-  "message": "Support agent is running"
+  "message": "Support agent is running",
+  "readiness": "ready",
+  "classifier_status": "live"
+}
+```
+
+When the app is running without `ANTHROPIC_API_KEY`, the endpoint still returns HTTP `200` but reports degraded readiness:
+
+```json
+{
+  "status": "ok",
+  "message": "Support agent is running in fallback-only mode",
+  "readiness": "degraded",
+  "classifier_status": "fallback_only"
 }
 ```
 
@@ -118,6 +131,7 @@ The service is designed to fail safely.
 - If the model returns malformed JSON, unsupported values, or a low-confidence result, the service routes to `manual_review`
 - The current fallback priority is `medium`
 - The confidence threshold defaults to `0.55`
+- Invalid `SUPPORT_AGENT_CONFIDENCE_THRESHOLD` or `SUPPORT_AGENT_MAX_TOKENS` values fail startup with a clear configuration error
 
 ## Local Setup
 
@@ -153,6 +167,12 @@ Environment variables:
 - `SUPPORT_AGENT_MODEL`: model name to call, defaults to `claude-3-5-haiku-latest`
 - `SUPPORT_AGENT_CONFIDENCE_THRESHOLD`: minimum confidence required to trust a model result
 - `SUPPORT_AGENT_MAX_TOKENS`: max response tokens for the model call
+
+Configuration notes:
+
+- `SUPPORT_AGENT_CONFIDENCE_THRESHOLD` must be a number from `0.0` to `1.0`
+- `SUPPORT_AGENT_MAX_TOKENS` must be a positive integer
+- Invalid values fail fast during app startup instead of silently changing runtime routing behavior
 
 ### 4. Start the API
 
@@ -201,10 +221,12 @@ python -m unittest discover -s tests -v
 The test suite covers:
 
 - health endpoint behavior
+- degraded versus ready classifier health reporting
 - successful triage responses
 - request validation failures
 - low-confidence fallback
 - invalid model output fallback
+- missing API keys, unsupported model values, and invalid env-backed configuration
 - metadata flowing into prompt construction
 
 ## CI

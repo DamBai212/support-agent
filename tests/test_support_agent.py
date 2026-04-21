@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from classifier import SupportTriageClassifier, TriageDecision
-from main import app
+from main import app, create_app
 from router import get_classifier
 
 
@@ -136,6 +138,102 @@ class SupportTriageClassifierTests(unittest.TestCase):
         self.assertEqual(decision.priority, "medium")
         self.assertTrue(decision.used_fallback)
 
+    def test_missing_api_key_falls_back_to_manual_review(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
+            classifier = SupportTriageClassifier(
+                confidence_threshold=0.55,
+                max_tokens=350,
+            )
+
+        decision = classifier.classify_ticket(
+            {
+                "subject": "Cannot reset password",
+                "body": "Password reset emails are not arriving for my account.",
+            }
+        )
+
+        self.assertEqual(decision.queue, "manual_review")
+        self.assertEqual(decision.priority, "medium")
+        self.assertTrue(decision.used_fallback)
+        self.assertIn("API key is not configured", decision.rationale)
+
+    def test_unsupported_model_values_fall_back_to_manual_review(self):
+        for invalid_payload in (
+            {
+                "queue": "sales",
+                "priority": "high",
+                "confidence": 0.92,
+                "rationale": "This should not use an unsupported queue.",
+            },
+            {
+                "queue": "billing",
+                "priority": "critical",
+                "confidence": 0.92,
+                "rationale": "This should not use an unsupported priority.",
+            },
+        ):
+            with self.subTest(invalid_payload=invalid_payload):
+                client = FakeAnthropicClient(
+                    lambda prompt, invalid_payload=invalid_payload: json.dumps(
+                        invalid_payload
+                    )
+                )
+                classifier = SupportTriageClassifier(
+                    client=client,
+                    confidence_threshold=0.55,
+                )
+
+                decision = classifier.classify_ticket(
+                    {
+                        "subject": "Unexpected response",
+                        "body": "The app produced an unexpected classification.",
+                    }
+                )
+
+                self.assertEqual(decision.queue, "manual_review")
+                self.assertEqual(decision.priority, "medium")
+                self.assertTrue(decision.used_fallback)
+
+    def test_invalid_confidence_threshold_env_raises_clear_error(self):
+        with patch.dict(
+            os.environ,
+            {"SUPPORT_AGENT_CONFIDENCE_THRESHOLD": "not-a-number"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD",
+            ):
+                SupportTriageClassifier()
+
+        with patch.dict(
+            os.environ,
+            {"SUPPORT_AGENT_CONFIDENCE_THRESHOLD": "1.5"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD",
+            ):
+                SupportTriageClassifier()
+
+    def test_invalid_max_tokens_env_raises_clear_error(self):
+        with patch.dict(
+            os.environ,
+            {"SUPPORT_AGENT_MAX_TOKENS": "zero"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "SUPPORT_AGENT_MAX_TOKENS"):
+                SupportTriageClassifier()
+
+        with patch.dict(
+            os.environ,
+            {"SUPPORT_AGENT_MAX_TOKENS": "0"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "SUPPORT_AGENT_MAX_TOKENS"):
+                SupportTriageClassifier()
+
 
 class SupportAgentApiTests(unittest.TestCase):
     def setUp(self):
@@ -150,7 +248,43 @@ class SupportAgentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"status": "ok", "message": "Support agent is running"},
+            {
+                "status": "ok",
+                "message": "Support agent is running in fallback-only mode",
+                "readiness": "degraded",
+                "classifier_status": "fallback_only",
+            },
+        )
+
+    def test_health_endpoint_reports_live_classifier_readiness(self):
+        live_classifier = SupportTriageClassifier(
+            client=FakeAnthropicClient(
+                lambda prompt: json.dumps(
+                    {
+                        "queue": "technical",
+                        "priority": "high",
+                        "confidence": 0.88,
+                        "rationale": "A live classifier is available for triage.",
+                    }
+                )
+            ),
+            confidence_threshold=0.55,
+            max_tokens=350,
+        )
+        test_app = create_app(classifier=live_classifier)
+        client = TestClient(test_app)
+
+        response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "status": "ok",
+                "message": "Support agent is running",
+                "readiness": "ready",
+                "classifier_status": "live",
+            },
         )
 
     def test_triage_endpoint_returns_structured_response(self):
@@ -202,3 +336,29 @@ class SupportAgentApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_create_app_wires_the_app_owned_classifier(self):
+        stub = ClassifierStub(
+            TriageDecision(
+                queue="technical",
+                priority="urgent",
+                confidence=0.97,
+                rationale="The stubbed classifier was used for this outage.",
+                used_fallback=False,
+            )
+        )
+        test_app = create_app(classifier=stub)
+        client = TestClient(test_app)
+
+        response = client.post(
+            "/triage",
+            json={
+                "subject": "Service outage",
+                "body": "The production service is unavailable for every request.",
+                "channel": "api",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["queue"], "technical")
+        self.assertEqual(stub.last_ticket["channel"], "api")

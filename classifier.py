@@ -7,6 +7,10 @@ from typing import Any, Mapping, Sequence
 from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+DEFAULT_MODEL = "claude-3-5-haiku-latest"
+DEFAULT_CONFIDENCE_THRESHOLD = 0.55
+DEFAULT_MAX_TOKENS = 350
+
 
 class ModelTriageDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -49,18 +53,16 @@ class SupportTriageClassifier:
         )
         self.fallback_queue = fallback_queue
         self.fallback_priority = fallback_priority
-        self.model = model or os.getenv("SUPPORT_AGENT_MODEL", "claude-3-5-haiku-latest")
-        self.confidence_threshold = (
+        self.model = model or os.getenv("SUPPORT_AGENT_MODEL", DEFAULT_MODEL)
+        self.confidence_threshold = self._resolve_confidence_threshold(
             confidence_threshold
-            if confidence_threshold is not None
-            else float(os.getenv("SUPPORT_AGENT_CONFIDENCE_THRESHOLD", "0.55"))
         )
-        self.max_tokens = (
-            max_tokens
-            if max_tokens is not None
-            else int(os.getenv("SUPPORT_AGENT_MAX_TOKENS", "350"))
-        )
+        self.max_tokens = self._resolve_max_tokens(max_tokens)
         self.client = client if client is not None else self._build_client()
+
+    @property
+    def can_classify_live(self) -> bool:
+        return self.client is not None
 
     def classify_ticket(self, ticket: Mapping[str, Any]) -> TriageDecision:
         if self.client is None:
@@ -87,6 +89,68 @@ class SupportTriageClassifier:
         if not api_key:
             return None
         return Anthropic(api_key=api_key)
+
+    @staticmethod
+    def _resolve_confidence_threshold(confidence_threshold: float | None) -> float:
+        if confidence_threshold is None:
+            confidence_threshold = SupportTriageClassifier._read_float_setting(
+                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD",
+                DEFAULT_CONFIDENCE_THRESHOLD,
+            )
+        return SupportTriageClassifier._validate_confidence_threshold(
+            confidence_threshold
+        )
+
+    @staticmethod
+    def _resolve_max_tokens(max_tokens: int | None) -> int:
+        if max_tokens is None:
+            max_tokens = SupportTriageClassifier._read_int_setting(
+                "SUPPORT_AGENT_MAX_TOKENS",
+                DEFAULT_MAX_TOKENS,
+            )
+        return SupportTriageClassifier._validate_max_tokens(max_tokens)
+
+    @staticmethod
+    def _read_float_setting(name: str, default: float) -> float:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+
+        try:
+            return float(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must be a number between 0.0 and 1.0; got {raw_value!r}."
+            ) from exc
+
+    @staticmethod
+    def _read_int_setting(name: str, default: int) -> int:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+
+        try:
+            return int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must be a positive integer; got {raw_value!r}."
+            ) from exc
+
+    @staticmethod
+    def _validate_confidence_threshold(value: float) -> float:
+        normalized_value = float(value)
+        if not 0.0 <= normalized_value <= 1.0:
+            raise ValueError(
+                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0."
+            )
+        return normalized_value
+
+    @staticmethod
+    def _validate_max_tokens(value: int) -> int:
+        normalized_value = int(value)
+        if normalized_value < 1:
+            raise ValueError("SUPPORT_AGENT_MAX_TOKENS must be greater than 0.")
+        return normalized_value
 
     def _build_prompt(self, ticket: Mapping[str, Any]) -> str:
         ticket_payload = json.dumps(ticket, indent=2, sort_keys=True)
