@@ -248,7 +248,43 @@ class SupportAgentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"status": "ok", "message": "Support agent is running"},
+            {
+                "status": "ok",
+                "message": "Support agent is running in fallback-only mode",
+                "readiness": "degraded",
+                "classifier_status": "fallback_only",
+            },
+        )
+
+    def test_health_endpoint_reports_live_classifier_readiness(self):
+        live_classifier = SupportTriageClassifier(
+            client=FakeAnthropicClient(
+                lambda prompt: json.dumps(
+                    {
+                        "queue": "technical",
+                        "priority": "high",
+                        "confidence": 0.88,
+                        "rationale": "A live classifier is available for triage.",
+                    }
+                )
+            ),
+            confidence_threshold=0.55,
+            max_tokens=350,
+        )
+        test_app = create_app(classifier=live_classifier)
+        client = TestClient(test_app)
+
+        response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "status": "ok",
+                "message": "Support agent is running",
+                "readiness": "ready",
+                "classifier_status": "live",
+            },
         )
 
     def test_triage_endpoint_returns_structured_response(self):

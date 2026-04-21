@@ -60,6 +60,10 @@ class SupportTriageClassifier:
         self.max_tokens = self._resolve_max_tokens(max_tokens)
         self.client = client if client is not None else self._build_client()
 
+    @property
+    def can_classify_live(self) -> bool:
+        return self.client is not None
+
     def classify_ticket(self, ticket: Mapping[str, Any]) -> TriageDecision:
         if self.client is None:
             return self._fallback(
