@@ -8,9 +8,15 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from classifier import SupportTriageClassifier, TriageDecision
+from classifier import (
+    FALLBACK_REASON_LOW_CONFIDENCE,
+    FALLBACK_REASON_MISSING_API_KEY,
+    SupportTriageClassifier,
+    TriageDecision,
+)
 from main import app, create_app
 from router import get_classifier
+from settings import SupportAgentSettings
 
 
 class FakeMessagesAPI:
@@ -111,12 +117,13 @@ class SupportTriageClassifierTests(unittest.TestCase):
         )
         classifier = SupportTriageClassifier(client=client, confidence_threshold=0.55)
 
-        decision = classifier.classify_ticket(
-            {
-                "subject": "Question",
-                "body": "Something happened and I am not sure what to ask for.",
-            }
-        )
+        with self.assertLogs("classifier", level="WARNING"):
+            decision = classifier.classify_ticket(
+                {
+                    "subject": "Question",
+                    "body": "Something happened and I am not sure what to ask for.",
+                }
+            )
 
         self.assertEqual(decision.queue, "manual_review")
         self.assertEqual(decision.priority, "medium")
@@ -127,12 +134,13 @@ class SupportTriageClassifierTests(unittest.TestCase):
         client = FakeAnthropicClient(lambda prompt: "this is not valid json")
         classifier = SupportTriageClassifier(client=client, confidence_threshold=0.55)
 
-        decision = classifier.classify_ticket(
-            {
-                "subject": "Need help",
-                "body": "The app is acting strangely and I need support.",
-            }
-        )
+        with self.assertLogs("classifier", level="WARNING"):
+            decision = classifier.classify_ticket(
+                {
+                    "subject": "Need help",
+                    "body": "The app is acting strangely and I need support.",
+                }
+            )
 
         self.assertEqual(decision.queue, "manual_review")
         self.assertEqual(decision.priority, "medium")
@@ -145,17 +153,35 @@ class SupportTriageClassifierTests(unittest.TestCase):
                 max_tokens=350,
             )
 
-        decision = classifier.classify_ticket(
-            {
-                "subject": "Cannot reset password",
-                "body": "Password reset emails are not arriving for my account.",
-            }
-        )
+        with self.assertLogs("classifier", level="WARNING"):
+            decision = classifier.classify_ticket(
+                {
+                    "subject": "Cannot reset password",
+                    "body": "Password reset emails are not arriving for my account.",
+                }
+            )
 
         self.assertEqual(decision.queue, "manual_review")
         self.assertEqual(decision.priority, "medium")
         self.assertTrue(decision.used_fallback)
         self.assertIn("API key is not configured", decision.rationale)
+
+    def test_missing_api_key_logs_fallback_reason(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
+            classifier = SupportTriageClassifier(
+                confidence_threshold=0.55,
+                max_tokens=350,
+            )
+
+        with self.assertLogs("classifier", level="WARNING") as captured_logs:
+            classifier.classify_ticket(
+                {
+                    "subject": "Cannot reset password",
+                    "body": "Password reset emails are not arriving for my account.",
+                }
+            )
+
+        self.assertIn(FALLBACK_REASON_MISSING_API_KEY, captured_logs.output[0])
 
     def test_unsupported_model_values_fall_back_to_manual_review(self):
         for invalid_payload in (
@@ -183,16 +209,40 @@ class SupportTriageClassifierTests(unittest.TestCase):
                     confidence_threshold=0.55,
                 )
 
-                decision = classifier.classify_ticket(
-                    {
-                        "subject": "Unexpected response",
-                        "body": "The app produced an unexpected classification.",
-                    }
-                )
+                with self.assertLogs("classifier", level="WARNING"):
+                    decision = classifier.classify_ticket(
+                        {
+                            "subject": "Unexpected response",
+                            "body": "The app produced an unexpected classification.",
+                        }
+                    )
 
                 self.assertEqual(decision.queue, "manual_review")
                 self.assertEqual(decision.priority, "medium")
                 self.assertTrue(decision.used_fallback)
+
+    def test_low_confidence_fallback_logs_reason(self):
+        client = FakeAnthropicClient(
+            lambda prompt: json.dumps(
+                {
+                    "queue": "general",
+                    "priority": "low",
+                    "confidence": 0.28,
+                    "rationale": "The issue is unclear from the ticket content.",
+                }
+            )
+        )
+        classifier = SupportTriageClassifier(client=client, confidence_threshold=0.55)
+
+        with self.assertLogs("classifier", level="WARNING") as captured_logs:
+            classifier.classify_ticket(
+                {
+                    "subject": "Question",
+                    "body": "Something happened and I am not sure what to ask for.",
+                }
+            )
+
+        self.assertIn(FALLBACK_REASON_LOW_CONFIDENCE, captured_logs.output[0])
 
     def test_invalid_confidence_threshold_env_raises_clear_error(self):
         with patch.dict(
@@ -233,6 +283,24 @@ class SupportTriageClassifierTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "SUPPORT_AGENT_MAX_TOKENS"):
                 SupportTriageClassifier()
+
+    def test_settings_from_env_loads_typed_configuration(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ANTHROPIC_API_KEY": "  test-key  ",
+                "SUPPORT_AGENT_MODEL": "claude-custom",
+                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD": "0.61",
+                "SUPPORT_AGENT_MAX_TOKENS": "512",
+            },
+            clear=False,
+        ):
+            settings = SupportAgentSettings.from_env()
+
+        self.assertEqual(settings.anthropic_api_key, "test-key")
+        self.assertEqual(settings.model, "claude-custom")
+        self.assertEqual(settings.confidence_threshold, 0.61)
+        self.assertEqual(settings.max_tokens, 512)
 
 
 class SupportAgentApiTests(unittest.TestCase):

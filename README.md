@@ -20,6 +20,7 @@ It accepts ticket text plus selected metadata, sends that context to an Anthropi
 - Validates request and response payloads with Pydantic
 - Uses an in-code queue and priority taxonomy for consistent routing
 - Falls back to `manual_review` when the model is unavailable, uncertain, or returns invalid output
+- Loads startup configuration through a typed settings object with explicit validation
 - Runs unit tests in GitHub Actions on pushes and pull requests to `main`
 
 ## Why This Project Matters
@@ -129,6 +130,7 @@ The service is designed to fail safely.
 
 - If `ANTHROPIC_API_KEY` is missing, requests still succeed but return a fallback decision
 - If the model returns malformed JSON, unsupported values, or a low-confidence result, the service routes to `manual_review`
+- Every fallback path emits a warning log with a structured reason such as `missing_api_key`, `low_confidence`, or `invalid_model_response`
 - The current fallback priority is `medium`
 - The confidence threshold defaults to `0.55`
 - Invalid `SUPPORT_AGENT_CONFIDENCE_THRESHOLD` or `SUPPORT_AGENT_MAX_TOKENS` values fail startup with a clear configuration error
@@ -226,7 +228,9 @@ The test suite covers:
 - request validation failures
 - low-confidence fallback
 - invalid model output fallback
+- fallback warning logs for key degradation paths
 - missing API keys, unsupported model values, and invalid env-backed configuration
+- typed settings loading and validation
 - metadata flowing into prompt construction
 
 ## CI
@@ -249,6 +253,7 @@ On every push or pull request to `main`, the workflow:
 |-- README.md
 |-- requirements.txt
 |-- router.py
+|-- settings.py
 `-- tests/
     `-- test_support_agent.py
 ```
@@ -256,6 +261,7 @@ On every push or pull request to `main`, the workflow:
 ## Implementation Notes
 
 - `main.py` creates the FastAPI app and registers the triage router
+- `settings.py` centralizes typed environment loading and startup validation
 - `router.py` defines the request and response models plus the `/triage` endpoint
-- `classifier.py` handles prompt construction, Anthropic API calls, JSON parsing, validation, and fallback logic
+- `classifier.py` handles prompt construction, Anthropic API calls, JSON parsing, validation, fallback logic, and fallback warning logs
 - The service is stateless and does not store tickets or decisions
