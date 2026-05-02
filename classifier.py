@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 from typing import Any, Mapping, Sequence
 
 from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-DEFAULT_MODEL = "claude-3-5-haiku-latest"
-DEFAULT_CONFIDENCE_THRESHOLD = 0.55
-DEFAULT_MAX_TOKENS = 350
+from settings import SupportAgentSettings
+
+logger = logging.getLogger(__name__)
+
+FALLBACK_REASON_INVALID_MODEL_RESPONSE = "invalid_model_response"
+FALLBACK_REASON_LOW_CONFIDENCE = "low_confidence"
+FALLBACK_REASON_MISSING_API_KEY = "missing_api_key"
+FALLBACK_REASON_MODEL_UNAVAILABLE = "model_unavailable"
+FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION = "unsupported_classification"
 
 
 class ModelTriageDecision(BaseModel):
@@ -36,6 +42,7 @@ class SupportTriageClassifier:
         self,
         *,
         client: Any | None = None,
+        settings: SupportAgentSettings | None = None,
         model: str | None = None,
         confidence_threshold: float | None = None,
         max_tokens: int | None = None,
@@ -53,11 +60,15 @@ class SupportTriageClassifier:
         )
         self.fallback_queue = fallback_queue
         self.fallback_priority = fallback_priority
-        self.model = model or os.getenv("SUPPORT_AGENT_MODEL", DEFAULT_MODEL)
-        self.confidence_threshold = self._resolve_confidence_threshold(
-            confidence_threshold
+        self.settings = self._resolve_settings(
+            settings=settings,
+            model=model,
+            confidence_threshold=confidence_threshold,
+            max_tokens=max_tokens,
         )
-        self.max_tokens = self._resolve_max_tokens(max_tokens)
+        self.model = self.settings.model
+        self.confidence_threshold = self.settings.confidence_threshold
+        self.max_tokens = self.settings.max_tokens
         self.client = client if client is not None else self._build_client()
 
     @property
@@ -67,6 +78,7 @@ class SupportTriageClassifier:
     def classify_ticket(self, ticket: Mapping[str, Any]) -> TriageDecision:
         if self.client is None:
             return self._fallback(
+                FALLBACK_REASON_MISSING_API_KEY,
                 "The classifier is unavailable because the Anthropic API key is not configured."
             )
 
@@ -75,82 +87,48 @@ class SupportTriageClassifier:
             raw_response = self._call_model(prompt)
             decision = self._parse_model_response(raw_response)
             return self._finalize_decision(decision)
-        except (ValidationError, ValueError, TypeError, json.JSONDecodeError):
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
             return self._fallback(
+                FALLBACK_REASON_INVALID_MODEL_RESPONSE,
                 "The classifier returned an invalid triage result and the ticket was routed to manual_review."
+                ,
+                error=exc,
             )
-        except Exception:
+        except Exception as exc:
             return self._fallback(
+                FALLBACK_REASON_MODEL_UNAVAILABLE,
                 "The classifier was unavailable during triage and the ticket was routed to manual_review."
+                ,
+                error=exc,
             )
 
     def _build_client(self) -> Anthropic | None:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = self.settings.anthropic_api_key
         if not api_key:
             return None
         return Anthropic(api_key=api_key)
 
     @staticmethod
-    def _resolve_confidence_threshold(confidence_threshold: float | None) -> float:
-        if confidence_threshold is None:
-            confidence_threshold = SupportTriageClassifier._read_float_setting(
-                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD",
-                DEFAULT_CONFIDENCE_THRESHOLD,
-            )
-        return SupportTriageClassifier._validate_confidence_threshold(
-            confidence_threshold
+    def _resolve_settings(
+        *,
+        settings: SupportAgentSettings | None,
+        model: str | None,
+        confidence_threshold: float | None,
+        max_tokens: int | None,
+    ) -> SupportAgentSettings:
+        resolved_settings = settings or SupportAgentSettings.from_env()
+        overrides: dict[str, str | float | int] = {}
+        if model is not None:
+            overrides["model"] = model
+        if confidence_threshold is not None:
+            overrides["confidence_threshold"] = confidence_threshold
+        if max_tokens is not None:
+            overrides["max_tokens"] = max_tokens
+        if not overrides:
+            return resolved_settings
+        return SupportAgentSettings.model_validate(
+            resolved_settings.model_dump() | overrides
         )
-
-    @staticmethod
-    def _resolve_max_tokens(max_tokens: int | None) -> int:
-        if max_tokens is None:
-            max_tokens = SupportTriageClassifier._read_int_setting(
-                "SUPPORT_AGENT_MAX_TOKENS",
-                DEFAULT_MAX_TOKENS,
-            )
-        return SupportTriageClassifier._validate_max_tokens(max_tokens)
-
-    @staticmethod
-    def _read_float_setting(name: str, default: float) -> float:
-        raw_value = os.getenv(name)
-        if raw_value is None:
-            return default
-
-        try:
-            return float(raw_value)
-        except ValueError as exc:
-            raise ValueError(
-                f"{name} must be a number between 0.0 and 1.0; got {raw_value!r}."
-            ) from exc
-
-    @staticmethod
-    def _read_int_setting(name: str, default: int) -> int:
-        raw_value = os.getenv(name)
-        if raw_value is None:
-            return default
-
-        try:
-            return int(raw_value)
-        except ValueError as exc:
-            raise ValueError(
-                f"{name} must be a positive integer; got {raw_value!r}."
-            ) from exc
-
-    @staticmethod
-    def _validate_confidence_threshold(value: float) -> float:
-        normalized_value = float(value)
-        if not 0.0 <= normalized_value <= 1.0:
-            raise ValueError(
-                "SUPPORT_AGENT_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0."
-            )
-        return normalized_value
-
-    @staticmethod
-    def _validate_max_tokens(value: int) -> int:
-        normalized_value = int(value)
-        if normalized_value < 1:
-            raise ValueError("SUPPORT_AGENT_MAX_TOKENS must be greater than 0.")
-        return normalized_value
 
     def _build_prompt(self, ticket: Mapping[str, Any]) -> str:
         ticket_payload = json.dumps(ticket, indent=2, sort_keys=True)
@@ -231,12 +209,14 @@ Ticket:
 
         if queue not in self.allowed_queues or priority not in self.allowed_priorities:
             return self._fallback(
+                FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION,
                 "The classifier returned an unsupported queue or priority and the ticket was routed to manual_review."
             )
 
         normalized_rationale = self._normalize_rationale(decision.rationale)
         if decision.confidence < self.confidence_threshold:
             return self._fallback(
+                FALLBACK_REASON_LOW_CONFIDENCE,
                 (
                     f"Model confidence was {decision.confidence:.2f}, so the ticket "
                     "was routed to manual_review."
@@ -252,13 +232,50 @@ Ticket:
             used_fallback=False,
         )
 
-    def _fallback(self, rationale: str, *, confidence: float = 0.0) -> TriageDecision:
+    def _fallback(
+        self,
+        reason: str,
+        rationale: str,
+        *,
+        confidence: float = 0.0,
+        error: Exception | None = None,
+    ) -> TriageDecision:
+        normalized_confidence = max(0.0, min(confidence, 1.0))
+        self._log_fallback(reason, confidence=normalized_confidence, error=error)
         return TriageDecision(
             queue=self.fallback_queue,
             priority=self.fallback_priority,
-            confidence=max(0.0, min(confidence, 1.0)),
+            confidence=normalized_confidence,
             rationale=self._normalize_rationale(rationale),
             used_fallback=True,
+        )
+
+    def _log_fallback(
+        self,
+        reason: str,
+        *,
+        confidence: float,
+        error: Exception | None,
+    ) -> None:
+        if error is None:
+            logger.warning(
+                "support_agent.triage_fallback reason=%s fallback_queue=%s fallback_priority=%s confidence=%.2f model=%s",
+                reason,
+                self.fallback_queue,
+                self.fallback_priority,
+                confidence,
+                self.model,
+            )
+            return
+
+        logger.warning(
+            "support_agent.triage_fallback reason=%s fallback_queue=%s fallback_priority=%s confidence=%.2f model=%s error=%s",
+            reason,
+            self.fallback_queue,
+            self.fallback_priority,
+            confidence,
+            self.model,
+            type(error).__name__,
         )
 
     def _normalize_rationale(self, rationale: str) -> str:

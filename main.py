@@ -11,6 +11,7 @@ from router import (
     SupportQueue,
     router as triage_router,
 )
+from settings import SupportAgentSettings
 
 
 def build_health_payload(classifier: SupportTriageClassifier) -> dict[str, str]:
@@ -31,7 +32,9 @@ def build_health_payload(classifier: SupportTriageClassifier) -> dict[str, str]:
 
 
 def create_classifier() -> SupportTriageClassifier:
+    settings = SupportAgentSettings.from_env()
     return SupportTriageClassifier(
+        settings=settings,
         allowed_queues=ALLOWED_QUEUES,
         allowed_priorities=ALLOWED_PRIORITIES,
         fallback_queue=SupportQueue.MANUAL_REVIEW.value,
