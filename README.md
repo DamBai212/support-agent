@@ -51,24 +51,35 @@ Supported priorities:
 
 ### `GET /health`
 
-Returns a liveness payload that also indicates whether live model-backed triage is ready:
+Returns a pure liveness payload for process-level health checks:
 
 ```json
 {
   "status": "ok",
-  "message": "Support agent is running",
-  "readiness": "ready",
+  "message": "Support agent is running"
+}
+```
+
+### `GET /ready`
+
+Returns a stricter readiness payload for live model-backed triage.
+
+When the live classifier is available, the endpoint returns HTTP `200`:
+
+```json
+{
+  "status": "ok",
+  "message": "Support agent is ready to classify live traffic",
   "classifier_status": "live"
 }
 ```
 
-When the app is running without `ANTHROPIC_API_KEY`, the endpoint still returns HTTP `200` but reports degraded readiness:
+When the app is running without `ANTHROPIC_API_KEY`, the endpoint returns HTTP `503` and reports degraded readiness:
 
 ```json
 {
-  "status": "ok",
+  "status": "degraded",
   "message": "Support agent is running in fallback-only mode",
-  "readiness": "degraded",
   "classifier_status": "fallback_only"
 }
 ```
@@ -223,7 +234,7 @@ python -m unittest discover -s tests -v
 The test suite covers:
 
 - health endpoint behavior
-- degraded versus ready classifier health reporting
+- readiness endpoint behavior
 - successful triage responses
 - request validation failures
 - low-confidence fallback

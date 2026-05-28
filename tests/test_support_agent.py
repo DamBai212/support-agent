@@ -318,13 +318,24 @@ class SupportAgentApiTests(unittest.TestCase):
             response.json(),
             {
                 "status": "ok",
+                "message": "Support agent is running",
+            },
+        )
+
+    def test_ready_endpoint_reports_degraded_classifier(self):
+        response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {
+                "status": "degraded",
                 "message": "Support agent is running in fallback-only mode",
-                "readiness": "degraded",
                 "classifier_status": "fallback_only",
             },
         )
 
-    def test_health_endpoint_reports_live_classifier_readiness(self):
+    def test_ready_endpoint_reports_live_classifier_readiness(self):
         live_classifier = SupportTriageClassifier(
             client=FakeAnthropicClient(
                 lambda prompt: json.dumps(
@@ -342,15 +353,14 @@ class SupportAgentApiTests(unittest.TestCase):
         test_app = create_app(classifier=live_classifier)
         client = TestClient(test_app)
 
-        response = client.get("/health")
+        response = client.get("/ready")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
             {
                 "status": "ok",
-                "message": "Support agent is running",
-                "readiness": "ready",
+                "message": "Support agent is ready to classify live traffic",
                 "classifier_status": "live",
             },
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 
 from classifier import SupportTriageClassifier
 from router import (
@@ -14,19 +14,24 @@ from router import (
 from settings import SupportAgentSettings
 
 
-def build_health_payload(classifier: SupportTriageClassifier) -> dict[str, str]:
+def build_health_payload() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "message": "Support agent is running",
+    }
+
+
+def build_ready_payload(classifier: SupportTriageClassifier) -> dict[str, str]:
     if classifier.can_classify_live:
         return {
             "status": "ok",
-            "message": "Support agent is running",
-            "readiness": "ready",
+            "message": "Support agent is ready to classify live traffic",
             "classifier_status": "live",
         }
 
     return {
-        "status": "ok",
+        "status": "degraded",
         "message": "Support agent is running in fallback-only mode",
-        "readiness": "degraded",
         "classifier_status": "fallback_only",
     }
 
@@ -51,7 +56,14 @@ def create_app(
 
     @app.get("/health")
     def health_check() -> dict[str, str]:
-        return build_health_payload(app.state.triage_classifier)
+        return build_health_payload()
+
+    @app.get("/ready")
+    def readiness_check(response: Response) -> dict[str, str]:
+        payload = build_ready_payload(app.state.triage_classifier)
+        if payload["status"] != "ok":
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return payload
 
     app.include_router(triage_router)
     return app
