@@ -9,12 +9,15 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from classifier import (
+    FALLBACK_REASON_INVALID_MODEL_RESPONSE,
     FALLBACK_REASON_LOW_CONFIDENCE,
     FALLBACK_REASON_MISSING_API_KEY,
+    FALLBACK_REASON_MODEL_UNAVAILABLE,
+    FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION,
     SupportTriageClassifier,
     TriageDecision,
 )
-from main import app, create_app
+from main import create_app
 from router import get_classifier
 from settings import SupportAgentSettings
 
@@ -305,10 +308,18 @@ class SupportTriageClassifierTests(unittest.TestCase):
 
 class SupportAgentApiTests(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app)
+        self.anthropic_api_key_patcher = patch.dict(
+            os.environ,
+            {"ANTHROPIC_API_KEY": ""},
+            clear=False,
+        )
+        self.anthropic_api_key_patcher.start()
+        self.app = create_app()
+        self.client = TestClient(self.app)
 
     def tearDown(self):
-        app.dependency_overrides.clear()
+        self.app.dependency_overrides.clear()
+        self.anthropic_api_key_patcher.stop()
 
     def test_health_endpoint_returns_success(self):
         response = self.client.get("/health")
@@ -365,6 +376,77 @@ class SupportAgentApiTests(unittest.TestCase):
             },
         )
 
+    def test_metrics_endpoint_reports_zeroed_fallback_counters(self):
+        response = self.client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("support_agent_classifier_live 0", response.text)
+        self.assertIn("support_agent_triage_fallback_events_total 0", response.text)
+        self.assertIn(
+            f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_MISSING_API_KEY}"}} 0',
+            response.text,
+        )
+        self.assertIn(
+            f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_INVALID_MODEL_RESPONSE}"}} 0',
+            response.text,
+        )
+
+    def test_metrics_endpoint_counts_fallback_reasons(self):
+        with self.assertLogs("classifier", level="WARNING"):
+            self.client.post(
+                "/triage",
+                json={
+                    "subject": "Invoice mismatch",
+                    "body": "My invoice shows a plan I never purchased.",
+                },
+            )
+
+        response = self.client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("support_agent_classifier_live 0", response.text)
+        self.assertIn("support_agent_triage_fallback_events_total 1", response.text)
+        self.assertIn(
+            f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_MISSING_API_KEY}"}} 1',
+            response.text,
+        )
+
+    def test_metrics_endpoint_reports_live_classifier_gauge(self):
+        live_classifier = SupportTriageClassifier(
+            client=FakeAnthropicClient(
+                lambda prompt: json.dumps(
+                    {
+                        "queue": "technical",
+                        "priority": "high",
+                        "confidence": 0.88,
+                        "rationale": "A live classifier is available for triage.",
+                    }
+                )
+            ),
+            confidence_threshold=0.55,
+            max_tokens=350,
+        )
+        test_app = create_app(classifier=live_classifier)
+        client = TestClient(test_app)
+
+        response = client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("support_agent_classifier_live 1", response.text)
+        self.assertIn("support_agent_triage_fallback_events_total 0", response.text)
+        self.assertIn(
+            f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_LOW_CONFIDENCE}"}} 0',
+            response.text,
+        )
+        self.assertIn(
+            f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_MODEL_UNAVAILABLE}"}} 0',
+            response.text,
+        )
+        self.assertIn(
+            f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION}"}} 0',
+            response.text,
+        )
+
     def test_triage_endpoint_returns_structured_response(self):
         stub = ClassifierStub(
             TriageDecision(
@@ -375,7 +457,7 @@ class SupportAgentApiTests(unittest.TestCase):
                 used_fallback=False,
             )
         )
-        app.dependency_overrides[get_classifier] = lambda: stub
+        self.app.dependency_overrides[get_classifier] = lambda: stub
 
         response = self.client.post(
             "/triage",

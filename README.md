@@ -16,6 +16,7 @@ It accepts ticket text plus selected metadata, sends that context to an Anthropi
 ## What It Does
 
 - Exposes a health endpoint for service checks
+- Exposes a metrics endpoint for lightweight in-process fallback counters
 - Exposes a synchronous `POST /triage` endpoint for support ticket classification
 - Validates request and response payloads with Pydantic
 - Uses an in-code queue and priority taxonomy for consistent routing
@@ -84,6 +85,25 @@ When the app is running without `ANTHROPIC_API_KEY`, the endpoint returns HTTP `
 }
 ```
 
+### `GET /metrics`
+
+Returns Prometheus-style plain-text metrics for current readiness state and in-process fallback counters.
+
+Example response:
+
+```text
+# HELP support_agent_classifier_live Whether live model-backed triage is available.
+# TYPE support_agent_classifier_live gauge
+support_agent_classifier_live 0
+# HELP support_agent_triage_fallback_events_total Total number of fallback decisions.
+# TYPE support_agent_triage_fallback_events_total counter
+support_agent_triage_fallback_events_total 3
+# HELP support_agent_triage_fallback_total Total number of fallback decisions by reason.
+# TYPE support_agent_triage_fallback_total counter
+support_agent_triage_fallback_total{reason="missing_api_key"} 2
+support_agent_triage_fallback_total{reason="low_confidence"} 1
+```
+
 ### `POST /triage`
 
 Accepts a support ticket and returns a structured triage decision.
@@ -142,6 +162,7 @@ The service is designed to fail safely.
 - If `ANTHROPIC_API_KEY` is missing, requests still succeed but return a fallback decision
 - If the model returns malformed JSON, unsupported values, or a low-confidence result, the service routes to `manual_review`
 - Every fallback path emits a warning log with a structured reason such as `missing_api_key`, `low_confidence`, or `invalid_model_response`
+- The `/metrics` endpoint exposes a live-classifier gauge and per-reason fallback counters for in-process observability
 - The current fallback priority is `medium`
 - The confidence threshold defaults to `0.55`
 - Invalid `SUPPORT_AGENT_CONFIDENCE_THRESHOLD` or `SUPPORT_AGENT_MAX_TOKENS` values fail startup with a clear configuration error
@@ -207,6 +228,18 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
+Readiness check:
+
+```bash
+curl -i http://127.0.0.1:8000/ready
+```
+
+Metrics:
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
 Triage request:
 
 ```bash
@@ -235,6 +268,7 @@ The test suite covers:
 
 - health endpoint behavior
 - readiness endpoint behavior
+- metrics endpoint behavior
 - successful triage responses
 - request validation failures
 - low-confidence fallback
@@ -261,6 +295,7 @@ On every push or pull request to `main`, the workflow:
 |-- .github/workflows/ci.yml
 |-- classifier.py
 |-- main.py
+|-- metrics.py
 |-- README.md
 |-- requirements.txt
 |-- router.py
@@ -272,6 +307,7 @@ On every push or pull request to `main`, the workflow:
 ## Implementation Notes
 
 - `main.py` creates the FastAPI app and registers the triage router
+- `metrics.py` tracks lightweight in-process counters for fallback reasons and classifier availability
 - `settings.py` centralizes typed environment loading and startup validation
 - `router.py` defines the request and response models plus the `/triage` endpoint
 - `classifier.py` handles prompt construction, Anthropic API calls, JSON parsing, validation, fallback logic, and fallback warning logs

@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from metrics import SupportAgentMetrics
 from settings import SupportAgentSettings
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,13 @@ FALLBACK_REASON_LOW_CONFIDENCE = "low_confidence"
 FALLBACK_REASON_MISSING_API_KEY = "missing_api_key"
 FALLBACK_REASON_MODEL_UNAVAILABLE = "model_unavailable"
 FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION = "unsupported_classification"
+FALLBACK_REASONS = (
+    FALLBACK_REASON_INVALID_MODEL_RESPONSE,
+    FALLBACK_REASON_LOW_CONFIDENCE,
+    FALLBACK_REASON_MISSING_API_KEY,
+    FALLBACK_REASON_MODEL_UNAVAILABLE,
+    FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION,
+)
 
 
 class ModelTriageDecision(BaseModel):
@@ -42,6 +50,7 @@ class SupportTriageClassifier:
         self,
         *,
         client: Any | None = None,
+        metrics: SupportAgentMetrics | None = None,
         settings: SupportAgentSettings | None = None,
         model: str | None = None,
         confidence_threshold: float | None = None,
@@ -69,11 +78,15 @@ class SupportTriageClassifier:
         self.model = self.settings.model
         self.confidence_threshold = self.settings.confidence_threshold
         self.max_tokens = self.settings.max_tokens
+        self.metrics = metrics
         self.client = client if client is not None else self._build_client()
 
     @property
     def can_classify_live(self) -> bool:
         return self.client is not None
+
+    def attach_metrics(self, metrics: SupportAgentMetrics) -> None:
+        self.metrics = metrics
 
     def classify_ticket(self, ticket: Mapping[str, Any]) -> TriageDecision:
         if self.client is None:
@@ -241,6 +254,8 @@ Ticket:
         error: Exception | None = None,
     ) -> TriageDecision:
         normalized_confidence = max(0.0, min(confidence, 1.0))
+        if self.metrics is not None:
+            self.metrics.record_fallback(reason)
         self._log_fallback(reason, confidence=normalized_confidence, error=error)
         return TriageDecision(
             queue=self.fallback_queue,
