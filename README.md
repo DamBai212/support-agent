@@ -24,6 +24,17 @@ It accepts ticket text plus selected metadata, sends that context to an Anthropi
 - Loads startup configuration through a typed settings object with explicit validation
 - Runs unit tests in GitHub Actions on pushes and pull requests to `main`
 
+## How It Works
+
+The request path is intentionally small and auditable:
+
+1. `main.py` creates the FastAPI app, loads environment variables, and registers the triage router.
+2. `router.py` validates incoming ticket payloads with Pydantic and passes normalized JSON-compatible data to the classifier.
+3. `classifier.py` builds a constrained prompt, calls Anthropic when an API key is configured, extracts JSON from the response, and validates the model decision.
+4. The classifier returns either a trusted routing decision or a safe fallback decision that routes the ticket to `manual_review`.
+
+The model is responsible for judgment across ambiguous support language. The application code is responsible for schemas, allowed values, confidence thresholds, and fallback behavior.
+
 ## Why This Project Matters
 
 - Demonstrates a prompt-engineered classification pipeline with structured outputs, error recovery, and feedback-oriented fallback behavior
@@ -167,6 +178,8 @@ The service is designed to fail safely.
 - The confidence threshold defaults to `0.55`
 - Invalid `SUPPORT_AGENT_CONFIDENCE_THRESHOLD` or `SUPPORT_AGENT_MAX_TOKENS` values fail startup with a clear configuration error
 
+Fallback responses use the same response schema as model-backed responses. Consumers can check `used_fallback` to decide whether a ticket needs human review, additional logging, or a retry.
+
 ## Local Setup
 
 ### 1. Create and activate a virtual environment
@@ -278,6 +291,24 @@ The test suite covers:
 - typed settings loading and validation
 - metadata flowing into prompt construction
 
+## Development Workflow
+
+Use the tests as the main safety check before changing prompt rules, model parsing, validation, or API schemas:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+When updating the routing taxonomy, keep these pieces in sync:
+
+- `SupportQueue` and `SupportPriority` in `router.py`
+- `ALLOWED_QUEUES` and `ALLOWED_PRIORITIES` passed into `SupportTriageClassifier`
+- prompt rules and fallback expectations in `classifier.py`
+- examples and taxonomy lists in this README
+- unit tests that assert the new behavior
+
+When changing request or response fields, update both the Pydantic models in `router.py` and the example payloads above.
+
 ## CI
 
 GitHub Actions is configured in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
@@ -287,6 +318,8 @@ On every push or pull request to `main`, the workflow:
 - checks out the repository
 - installs dependencies from `requirements.txt`
 - runs `python -m unittest discover -s tests -v`
+
+The workflow also supports manual runs through `workflow_dispatch`.
 
 ## Project Layout
 
@@ -312,3 +345,4 @@ On every push or pull request to `main`, the workflow:
 - `router.py` defines the request and response models plus the `/triage` endpoint
 - `classifier.py` handles prompt construction, Anthropic API calls, JSON parsing, validation, fallback logic, and fallback warning logs
 - The service is stateless and does not store tickets or decisions
+- Tests use fakes and dependency overrides instead of live model calls, so the suite is deterministic and does not require `ANTHROPIC_API_KEY`
