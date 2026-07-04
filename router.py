@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from classifier import SupportTriageClassifier
+from metrics import SupportAgentMetrics
 
 
 class SupportQueue(str, Enum):
@@ -75,7 +76,15 @@ def get_classifier(request: Request) -> SupportTriageClassifier:
     return classifier
 
 
+def get_metrics(request: Request) -> SupportAgentMetrics:
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics is None:
+        raise RuntimeError("Support agent metrics have not been configured.")
+    return metrics
+
+
 ClassifierDependency = Annotated[SupportTriageClassifier, Depends(get_classifier)]
+MetricsDependency = Annotated[SupportAgentMetrics, Depends(get_metrics)]
 
 router = APIRouter()
 
@@ -84,8 +93,14 @@ router = APIRouter()
 def triage_ticket(
     ticket: TriageRequest,
     triage_classifier: ClassifierDependency,
+    metrics: MetricsDependency,
 ) -> TriageResponse:
     decision = triage_classifier.classify_ticket(
         ticket.model_dump(mode="json", exclude_none=True)
+    )
+    metrics.record_decision(
+        queue=decision.queue,
+        priority=decision.priority,
+        used_fallback=decision.used_fallback,
     )
     return TriageResponse.model_validate(decision.model_dump())
