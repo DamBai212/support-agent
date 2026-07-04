@@ -381,6 +381,7 @@ class SupportAgentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("support_agent_classifier_live 0", response.text)
+        self.assertIn("support_agent_triage_decisions_total 0", response.text)
         self.assertIn("support_agent_triage_fallback_events_total 0", response.text)
         self.assertIn(
             f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_MISSING_API_KEY}"}} 0',
@@ -405,6 +406,11 @@ class SupportAgentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("support_agent_classifier_live 0", response.text)
+        self.assertIn("support_agent_triage_decisions_total 1", response.text)
+        self.assertIn(
+            'support_agent_triage_decision_total{queue="manual_review",priority="medium",used_fallback="true"} 1',
+            response.text,
+        )
         self.assertIn("support_agent_triage_fallback_events_total 1", response.text)
         self.assertIn(
             f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_MISSING_API_KEY}"}} 1',
@@ -433,6 +439,7 @@ class SupportAgentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("support_agent_classifier_live 1", response.text)
+        self.assertIn("support_agent_triage_decisions_total 0", response.text)
         self.assertIn("support_agent_triage_fallback_events_total 0", response.text)
         self.assertIn(
             f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_LOW_CONFIDENCE}"}} 0',
@@ -446,6 +453,48 @@ class SupportAgentApiTests(unittest.TestCase):
             f'support_agent_triage_fallback_total{{reason="{FALLBACK_REASON_UNSUPPORTED_CLASSIFICATION}"}} 0',
             response.text,
         )
+
+    def test_metrics_endpoint_counts_live_decision_outcomes(self):
+        stub = ClassifierStub(
+            TriageDecision(
+                queue="billing",
+                priority="high",
+                confidence=0.91,
+                rationale="The ticket describes a clear invoice issue for a premium customer.",
+                used_fallback=False,
+            )
+        )
+        self.app.dependency_overrides[get_classifier] = lambda: stub
+
+        self.client.post(
+            "/triage",
+            json={
+                "subject": "Invoice mismatch",
+                "body": "My invoice shows a plan I never purchased.",
+            },
+        )
+
+        response = self.client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("support_agent_triage_decisions_total 1", response.text)
+        self.assertIn(
+            'support_agent_triage_decision_total{queue="billing",priority="high",used_fallback="false"} 1',
+            response.text,
+        )
+        self.assertIn("support_agent_triage_fallback_events_total 0", response.text)
+
+    def test_validation_failures_do_not_increment_decision_metrics(self):
+        self.client.post(
+            "/triage",
+            json={"subject": "Missing body"},
+        )
+
+        response = self.client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("support_agent_triage_decisions_total 0", response.text)
+        self.assertNotIn("support_agent_triage_decision_total{", response.text)
 
     def test_triage_endpoint_returns_structured_response(self):
         stub = ClassifierStub(
