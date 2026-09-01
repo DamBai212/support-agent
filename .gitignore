@@ -1,4 +1,14 @@
+# Environments
 venv/
+.venv/
 .env
+
+# Python
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
