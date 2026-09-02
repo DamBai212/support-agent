@@ -1,8 +1,24 @@
 # Support Agent
 
-`Support-agent` is an LLM-powered internal tooling agent that classifies incoming support requests, generates structured responses, and routes work by intent. It is built to demonstrate real AI integration in an internal operations workflow, with production-minded validation, fallback handling, and error recovery around every model decision.
+[![CI](https://github.com/DamBai212/support-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/DamBai212/support-agent/actions/workflows/ci.yml)
 
-It accepts ticket text plus selected metadata, sends that context to an Anthropic model, and returns a structured routing decision with a queue, priority, confidence score, short rationale, and fallback flag.
+Support teams triage incoming tickets by hand; this service uses an LLM to classify each ticket into a queue and priority, and is built to fail safely — never blocking a ticket — when the model is unavailable, uncertain, or wrong.
+
+## Demo
+
+<!-- TODO: replace with a screenshot or short screen recording of a POST /triage request and response, e.g. via /docs or curl -->
+
+`POST /triage` in, a structured routing decision out:
+
+```json
+{
+  "queue": "technical",
+  "priority": "urgent",
+  "confidence": 0.91,
+  "rationale": "An enterprise customer reported a severe production outage affecting authentication.",
+  "used_fallback": false
+}
+```
 
 ## Tech Used
 
@@ -34,6 +50,14 @@ The request path is intentionally small and auditable:
 4. The classifier returns either a trusted routing decision or a safe fallback decision that routes the ticket to `manual_review`.
 
 The model is responsible for judgment across ambiguous support language. The application code is responsible for schemas, allowed values, confidence thresholds, and fallback behavior.
+
+## Architecture Decision: Fail Safe, Not Fail Accurate
+
+The classifier never raises and never blocks a ticket. `classify_ticket` always returns a `TriageDecision` — either a trusted, model-backed one, or a fallback that routes to `manual_review` with `used_fallback=true`. Five distinct failure modes (missing API key, model unreachable, malformed JSON, an out-of-taxonomy queue/priority, or confidence below the `0.55` threshold) all collapse into the same safe outcome instead of five different error paths.
+
+**Why:** a wrong or missing triage decision is worse for a support queue than a slow one. Silently dropping a ticket, or 500-ing on a flaky model call, means a customer issue disappears; falling back to `manual_review` means a human sees it. Optimizing for "always return something routable" over "always be right" trades classification coverage for availability.
+
+**The tradeoff:** this makes precision unmeasurable at the API layer — the same `queue: manual_review` response is returned whether the model was down, unconfigured, or just unsure, and a caller who doesn't check `used_fallback` can't tell a real decision from a punt. `/metrics` exists specifically to make that visible from the outside (per-reason fallback counters, a live-classifier gauge) rather than requiring log spelunking. The alternative — surfacing distinct error responses per failure mode — would give callers more diagnostic detail, at the cost of every integration needing its own error handling instead of a single `used_fallback` check.
 
 ## Why This Project Matters
 
